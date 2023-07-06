@@ -5,8 +5,9 @@ import shutil
 import time
 import warnings
 from enum import Enum
-
+from openpyxl import Workbook
 import torch
+import pdb
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -37,6 +38,8 @@ parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
+parser.add_argument('--local_rank', default=-1, type=int,
+                    help='local_rank')         
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=256, type=int,
@@ -83,7 +86,7 @@ best_acc1 = 0
 
 def main():
     args = parser.parse_args()
-
+    #pdb.set_trace()
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -103,26 +106,44 @@ def main():
         args.world_size = int(os.environ["WORLD_SIZE"])
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
+    
     if torch.cuda.is_available():
         ngpus_per_node = torch.cuda.device_count()
     else:
         ngpus_per_node = 1
+
+    losses = torch.zeros((ngpus_per_node, args.epochs)).cuda()
+    #print("losses at the beginning")
+    #print(losses)
+    
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
         args.world_size = ngpus_per_node * args.world_size
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(losses, ngpus_per_node, args))
     else:
         # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+        main_worker(args.gpu, losses, ngpus_per_node, args)
+
+    # Save the losses in an excel file
+    print("losses outside")
+    print(losses)
+
+    outputfile = "mylog_orig_alaki.xlsx"
+    workbook = Workbook()                                                          
+    sheet = workbook.active                                                        
+    for rank in range(ngpus_per_node):                                             
+        for row_idx, gpu_losses in enumerate(losses[rank]):                    
+            sheet.cell(row=row_idx + 1, column = rank+1, value = float(gpu_losses))
+            workbook.save(outputfile)         
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(gpu, losses, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
+    print("gpu id is ", gpu, "fine")
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -269,17 +290,22 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
-
+    #pdb.set_trace()
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, args)
-
-        # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        train_loss = train(train_loader, model, criterion, optimizer, epoch, device, args)
+        losses[gpu, epoch] = train_loss
+        #print("train_loss", train_loss)
+        #print(losses)
+        #print("======")
         
+        # evaluate on validation set
+        #acc1 = validate(val_loader, model, criterion, args)
+        acc1 = 0.1
         scheduler.step()
         
         # remember best acc@1 and save checkpoint
@@ -296,7 +322,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
-
+    #print("final losses:")
+    #print(losses)
+    #return(losses)
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -324,7 +352,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # compute output
         output = model(images)
         loss = criterion(output, target)
-
+        #pdb.set_trace()
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images.size(0))
@@ -334,6 +362,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
+        #pdb.set_trace()
         optimizer.step()
 
         # measure elapsed time
@@ -342,7 +371,10 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+        if i ==3:
+            break
 
+    return (float(losses.val))
 
 def validate(val_loader, model, criterion, args):
 
