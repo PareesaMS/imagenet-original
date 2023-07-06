@@ -22,6 +22,15 @@ import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
+# Set the random seed
+seed = 20
+random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -113,6 +122,7 @@ def main():
         ngpus_per_node = 1
 
     losses = torch.zeros((ngpus_per_node, args.epochs)).cuda()
+    acc1s = torch.zeros((ngpus_per_node, args.epochs)).cuda()
     #print("losses at the beginning")
     #print(losses)
     
@@ -122,10 +132,10 @@ def main():
         args.world_size = ngpus_per_node * args.world_size
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(losses, ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(losses, acc1s, ngpus_per_node, args))
     else:
         # Simply call main_worker function
-        main_worker(args.gpu, losses, ngpus_per_node, args)
+        main_worker(args.gpu, losses, acc1s, ngpus_per_node, args)
 
     # Save the losses in an excel file
     print("losses outside")
@@ -133,14 +143,16 @@ def main():
 
     outputfile = "mylog_orig_alaki.xlsx"
     workbook = Workbook()                                                          
-    sheet = workbook.active                                                        
-    for rank in range(ngpus_per_node):                                             
-        for row_idx, gpu_losses in enumerate(losses[rank]):                    
-            sheet.cell(row=row_idx + 1, column = rank+1, value = float(gpu_losses))
-            workbook.save(outputfile)         
+    sheet1 = workbook.active
+    sheet1.cell(row= 1, column = 1, value = "Loss")
+    sheet1.cell(row= 1, column = ngpus_per_node + 4, value = "Acc")
+    for rank in range(ngpus_per_node):
+        for row_idx, (gpu_losses, gpu_acc1s) in enumerate(zip(losses[rank], acc1s[rank])):
+            sheet1.cell(row=row_idx + 2, column = rank+1, value = float(gpu_losses))
+            sheet1.cell(row=row_idx + 2, column = rank+1 + ngpus_per_node + 3, value = float(gpu_acc1s))
+            workbook.save(outputfile)
 
-
-def main_worker(gpu, losses, ngpus_per_node, args):
+def main_worker(gpu, losses, acc1s, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
     print("gpu id is ", gpu, "fine")
@@ -304,8 +316,8 @@ def main_worker(gpu, losses, ngpus_per_node, args):
         #print("======")
         
         # evaluate on validation set
-        #acc1 = validate(val_loader, model, criterion, args)
-        acc1 = 0.1
+        acc1 = validate(val_loader, model, criterion, args)
+        acc1s[gpu, epoch] = acc1
         scheduler.step()
         
         # remember best acc@1 and save checkpoint
